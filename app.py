@@ -162,6 +162,81 @@ def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def supabase_config():
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "")).rstrip("/")
+        key = str(st.secrets.get("SUPABASE_KEY", ""))
+        return url, key
+    except Exception:
+        return "", ""
+
+
+def supabase_enabled():
+    url, key = supabase_config()
+    return bool(url and key)
+
+
+def supabase_headers(return_representation=False):
+    _, key = supabase_config()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if return_representation:
+        headers["Prefer"] = "return=representation"
+    return headers
+
+
+def normalize_db_record(row):
+    row = dict(row or {})
+    if row.get("comissoes") is None:
+        row["comissoes"] = []
+    if row.get("assuntos_relacionados") is None:
+        row["assuntos_relacionados"] = []
+    return row
+
+
+def load_records():
+    """Carrega todos os papers. Supabase é a fonte principal quando configurado."""
+    if supabase_enabled():
+        url, _ = supabase_config()
+        endpoint = f"{url}/rest/v1/ipa_papers?select=*&order=data.desc,criado_em.desc"
+        response = requests.get(endpoint, headers=supabase_headers(), timeout=30)
+        response.raise_for_status()
+        return [normalize_db_record(row) for row in response.json()]
+
+    # fallback local apenas para desenvolvimento
+    return load_json(DATA_FILE, [])
+
+
+def save_record(record):
+    """Insere um novo paper sem substituir registros existentes."""
+    if supabase_enabled():
+        url, _ = supabase_config()
+        endpoint = f"{url}/rest/v1/ipa_papers"
+        payload = dict(record)
+        payload.pop("id", None)
+        response = requests.post(
+            endpoint,
+            headers=supabase_headers(return_representation=True),
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return normalize_db_record(rows[0]) if rows else record
+
+    # fallback local: append simples; não usar como armazenamento definitivo no Streamlit Cloud
+    records = load_json(DATA_FILE, [])
+    next_id = max([int(r.get("id", 0) or 0) for r in records], default=0) + 1
+    local_record = dict(record)
+    local_record["id"] = next_id
+    records.append(local_record)
+    save_json(DATA_FILE, records)
+    return local_record
+
+
 def extract_text(uploaded_file):
     raw = uploaded_file.getvalue()
     name = uploaded_file.name.lower()
@@ -664,12 +739,22 @@ def hero(title, subtitle):
 # ---------- boot ----------
 inject_css()
 comissoes = load_json(COMM_FILE, DEFAULT_COMISSOES)
-reunioes = load_json(DATA_FILE, [])
+reunioes = load_records()
 for item in reunioes:
     if "comissoes" not in item:
         item["comissoes"] = [item.pop("comissao")] if item.get("comissao") else []
 existing_themes = sorted(set(r.get("tema", "") for r in reunioes if r.get("tema")))
 pagina = sidebar_logo_and_menu()
+
+if supabase_enabled():
+    st.sidebar.success("Banco conectado")
+else:
+    st.sidebar.warning("Modo temporário")
+    st.warning(
+        "⚠️ O banco persistente ainda não está conectado. "
+        "Cadastros feitos neste modo podem desaparecer ou não aparecer em outra instância do Streamlit. "
+        "Conecte o Supabase antes de alimentar a base definitiva."
+    )
 
 # ---------- pages ----------
 if pagina == "Pesquisar":
@@ -881,7 +966,6 @@ else:
                     st.error("O conteúdo integral do paper não foi capturado.")
                 else:
                     new_record = {
-                        "id": max([r.get("id", 0) for r in reunioes], default=0) + 1,
                         "data": meeting_date.isoformat(),
                         "comissoes": selected_commissions,
                         "tema": theme.strip(),
@@ -899,10 +983,14 @@ else:
                         "texto_original": original_text,
                         "criado_em": datetime.now().isoformat(timespec="seconds"),
                     }
-                    reunioes.append(new_record)
-                    save_json(DATA_FILE, reunioes)
+                    try:
+                        saved = save_record(new_record)
+                    except Exception as exc:
+                        st.error(f"Não foi possível salvar o paper no banco: {exc}")
+                        st.stop()
+
                     for key in ["analysis", "original_text", "source_type", "file_name"]:
                         st.session_state.pop(key, None)
-                    st.success("Paper completo registrado na base.")
+                    st.success("Paper completo registrado. Os registros anteriores foram preservados.")
                     st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
