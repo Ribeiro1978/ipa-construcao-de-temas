@@ -457,6 +457,33 @@ def ai_enabled():
     return bool(key)
 
 
+def safe_google_error(response):
+    """Extrai código e mensagem da API sem expor credenciais."""
+    try:
+        payload = response.json()
+        err = payload.get("error", payload)
+        code = err.get("code", response.status_code)
+        status = err.get("status", "")
+        message = err.get("message", "Erro sem mensagem retornada pela API.")
+        return f"HTTP {response.status_code} · {status or code}: {message}"
+    except Exception:
+        return f"HTTP {response.status_code}: {response.text[:500]}"
+
+
+def gemini_connection_status():
+    if not ai_enabled():
+        return False, "Chave não configurada"
+    key, model = load_secrets()
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}?key={key}"
+        response = requests.get(url, timeout=20)
+        if response.ok:
+            return True, model
+        return False, safe_google_error(response)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {str(exc)[:180]}"
+
+
 def extract_json(raw):
     raw = (raw or "").strip()
     raw = re.sub(r"^```(?:json)?", "", raw, flags=re.I).strip()
@@ -581,7 +608,8 @@ PAPER COMPLETO:
         "generationConfig": {"responseMimeType": "application/json"},
     }
     response = requests.post(url, json=payload, timeout=90)
-    response.raise_for_status()
+    if not response.ok:
+        raise RuntimeError(safe_google_error(response))
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     data = extract_json(raw)
 
@@ -618,10 +646,10 @@ def analyze(text, official, existing_themes):
         except Exception as exc:
             st.error(
                 "A leitura inteligente por IA falhou. "
-                "Não vou fingir que a análise básica equivale à leitura semântica."
+                "A análise abaixo é apenas o fallback básico."
             )
-            st.caption(f"Detalhe técnico: {type(exc).__name__}")
-            st.info("Foi gerada abaixo apenas uma leitura básica para você não perder o conteúdo.")
+            st.code(str(exc), language=None)
+            st.info("A mensagem acima vem da API do Gemini e não contém sua chave.")
             basic = analyze_local(text, official, existing_themes)
             basic["motor"] = "Leitura básica · IA falhou"
             return basic
@@ -839,11 +867,16 @@ else:
     if db_detail:
         st.caption(f"Detalhe técnico: {db_detail}")
 
-if ai_enabled():
-    _, active_model = load_secrets()
-    st.sidebar.success(f"IA ativa · {active_model}")
+ai_ok, ai_detail = gemini_connection_status()
+if ai_ok:
+    st.sidebar.success(f"IA conectada · {ai_detail}")
 else:
-    st.sidebar.warning("IA não configurada")
+    if ai_enabled():
+        st.sidebar.error("IA com erro")
+        with st.sidebar.expander("Ver detalhe da IA"):
+            st.caption(ai_detail)
+    else:
+        st.sidebar.warning("IA não configurada")
 
 # ---------- pages ----------
 if pagina == "Pesquisar":
