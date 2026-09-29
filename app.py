@@ -181,6 +181,20 @@ def supabase_enabled():
     return bool(url and key)
 
 
+def supabase_connection_status():
+    """Valida de fato a conexão antes de mostrar 'Banco conectado'."""
+    if not supabase_enabled():
+        return False, "Secrets não configurados"
+    url, _ = supabase_config()
+    try:
+        endpoint = f"{url}/rest/v1/ipa_papers?select=id&limit=1"
+        response = requests.get(endpoint, headers=supabase_headers(), timeout=12)
+        response.raise_for_status()
+        return True, ""
+    except Exception as exc:
+        return False, type(exc).__name__
+
+
 def supabase_headers(return_representation=False):
     _, key = supabase_config()
     headers = {
@@ -759,15 +773,17 @@ for item in reunioes:
 existing_themes = sorted(set(r.get("tema", "") for r in reunioes if r.get("tema")))
 pagina = sidebar_logo_and_menu()
 
-if supabase_enabled():
+db_ok, db_detail = supabase_connection_status()
+if db_ok:
     st.sidebar.success("Banco conectado")
 else:
-    st.sidebar.warning("Modo temporário")
+    st.sidebar.warning("Banco não conectado")
     st.warning(
-        "⚠️ O banco persistente ainda não está conectado. "
-        "Cadastros feitos neste modo podem desaparecer ou não aparecer em outra instância do Streamlit. "
-        "Conecte o Supabase antes de alimentar a base definitiva."
+        "⚠️ O Supabase ainda não respondeu corretamente. "
+        "Confira SUPABASE_URL e SUPABASE_KEY em Settings > Secrets do Streamlit."
     )
+    if db_detail:
+        st.caption(f"Detalhe técnico: {db_detail}")
 
 # ---------- pages ----------
 if pagina == "Pesquisar":
