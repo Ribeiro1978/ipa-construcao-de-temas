@@ -226,6 +226,21 @@ def detect_commissions(text, official):
 
 def detect_theme(text, existing_themes):
     ntext = norm(text)
+    # Primeiro tenta ler o tema diretamente do cabeçalho padrão dos papers.
+    first_lines = [x.strip() for x in text.splitlines()[:8] if x.strip()]
+    for line in first_lines:
+        clean = re.sub(r"[*_]", "", line).strip()
+        match = re.search(r"(?i)PAPER\s*\|\s*(.+?)(?:\s+IPA)?\s*[-–—]\s*\d{1,2}/\d{1,2}/20\d{2}", clean)
+        if match:
+            header = match.group(1).strip()
+            header = re.sub(r"(?i)^GT\s+(?:DA|DE|DO|DAS|DOS)\s+", "", header).strip()
+            header = re.sub(r"(?i)^COMISS[AÃ]O\s+(?:DA|DE|DO|DAS|DOS)\s+", "", header).strip()
+            for theme in list(dict.fromkeys(existing_themes + TEMAS_REFERENCIA)):
+                if norm(theme) in norm(header) or norm(header) in norm(theme):
+                    return theme, "Alta"
+            if 3 <= len(header) <= 100:
+                return header.title(), "Alta"
+
     hits = []
     for theme in list(dict.fromkeys(existing_themes + TEMAS_REFERENCIA)):
         count = ntext.count(norm(theme))
@@ -241,7 +256,70 @@ def detect_theme(text, existing_themes):
     return "Novo tema", "Baixa"
 
 
+def normalize_heading(line):
+    line = re.sub(r"[*_]", "", str(line or ""))
+    line = re.sub(r"^[\s🔹📌⚠️✅➡️▪️•\-–—]+", "", line).strip()
+    line = re.sub(r"\s+", " ", line)
+    return norm(line)
+
+
+def parse_paper_blocks(text):
+    """Reconhece o formato real dos papers enviados por WhatsApp."""
+    lines = [x.rstrip() for x in text.splitlines()]
+    blocks = {"introducao": [], "posicoes": [], "encaminhamentos": [], "importante": [], "comunicacao": [], "observacoes": []}
+    current = "introducao"
+    title_skipped = False
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            if blocks[current] and blocks[current][-1] != "":
+                blocks[current].append("")
+            continue
+
+        # pula apenas o cabeçalho PAPER | ... da introdução
+        if not title_skipped and re.search(r"(?i)^\s*PAPER\s*\|", stripped):
+            title_skipped = True
+            continue
+
+        heading = normalize_heading(stripped)
+        if heading in {"posicoes das entidades", "posicionamento das entidades", "posicoes", "posicionamentos"}:
+            current = "posicoes"
+            continue
+        if heading in {"encaminhamento", "encaminhamentos", "proximos passos", "deliberacoes"}:
+            current = "encaminhamentos"
+            continue
+        if heading.startswith("importante") or heading.startswith("atencao"):
+            current = "importante"
+            # preserva texto após "Importante:" na mesma linha
+            after = re.sub(r"(?i)^.*?(importante|atenção|atencao)\s*:\s*", "", stripped).strip()
+            if after and norm(after) != heading:
+                blocks[current].append(after)
+            continue
+        if heading in {"comunicacao", "demanda para comunicacao", "demanda comunicacao"}:
+            current = "comunicacao"
+            continue
+        if heading in {"observacao", "observacoes", "observacao institucional", "observacoes institucionais"}:
+            current = "observacoes"
+            continue
+
+        blocks[current].append(stripped)
+
+    def collapse(rows):
+        out = []
+        for row in rows:
+            if row == "":
+                if out and out[-1] != "":
+                    out.append("")
+            else:
+                out.append(row)
+        return "\n".join(out).strip()
+
+    return {key: collapse(value) for key, value in blocks.items()}
+
+
 def section(text, headings, max_chars=5000):
+    # fallback para papers sem estrutura explícita
     lines = [x.strip() for x in text.splitlines()]
     for i, line in enumerate(lines):
         if any(norm(h) in norm(line) for h in headings):
@@ -276,24 +354,55 @@ def extract_json(raw):
 def analyze_local(text, official, existing_themes):
     commissions, conf_c = detect_commissions(text, official)
     theme, conf_t = detect_theme(text, existing_themes)
-    summary = section(text, ["resumo", "síntese", "discussão", "principais pontos"], 6000)
+    blocks = parse_paper_blocks(text)
+
+    intro = blocks.get("introducao", "").strip()
+    posicoes = blocks.get("posicoes", "").strip()
+    encaminhamentos = blocks.get("encaminhamentos", "").strip()
+    importante = blocks.get("importante", "").strip()
+    observacoes = blocks.get("observacoes", "").strip()
+    comunicacao = blocks.get("comunicacao", "").strip()
+
+    # Resumo preserva a abertura factual do paper; posições ficam em campo próprio.
+    summary = intro or section(text, ["resumo", "síntese", "discussão", "principais pontos"], 6000)
     if not summary:
         summary = re.sub(r"\s+", " ", text).strip()[:2500]
-    encaminhamentos = section(text, ["encaminhamentos", "próximos passos", "deliberações"], 5000)
-    comunicacao = section(text, ["comunicação", "demanda comunicação"], 3500) or "Sem demanda específica identificada."
+
+    if not encaminhamentos:
+        encaminhamentos = section(text, ["encaminhamentos", "próximos passos", "deliberações"], 5000)
+    if not comunicacao:
+        comunicacao = section(text, ["comunicação", "demanda comunicação"], 3500)
+    if not comunicacao:
+        comunicacao = "Sem demanda específica identificada."
+
+    # No formato IPA, o bloco "Importante" normalmente registra ressalva ou etapa institucional pendente.
+    pontos_pendentes = importante
+    observacao_institucional = observacoes or importante
+
+    assuntos = []
+    ntext = norm(text)
+    if "diferimento" in ntext:
+        assuntos.append("Diferimento da tributação")
+    if "producao rural" in ntext or "produção rural" in text.lower():
+        assuntos.append("Comercialização da produção rural")
+    if "assembleia geral" in ntext:
+        assuntos.append("Assembleia Geral do IPA")
+
     return {
         "data": find_date(text),
         "comissoes": commissions,
         "tema": theme,
         "resumo": summary,
+        "posicoes_entidades": posicoes,
         "encaminhamentos": encaminhamentos,
         "comunicacao": comunicacao,
         "conf_c": conf_c,
         "conf_t": conf_t,
-        "assuntos_relacionados": [],
-        "pontos_pendentes": "",
+        "assuntos_relacionados": assuntos,
+        "pontos_pendentes": pontos_pendentes,
+        "observacao_institucional": observacao_institucional,
         "mudancas": "",
-        "motor": "Análise local",
+        "motor": "Análise local estruturada",
         "tema_existente": theme in existing_themes,
     }
 
@@ -314,10 +423,12 @@ comissoes (array somente com nomes válidos),
 tema (string curta e representativa),
 tema_existente (boolean),
 assuntos_relacionados (array),
-resumo (resumo completo e fiel, preservando os principais argumentos, posições e fatos),
+resumo (síntese factual da abertura/contexto da reunião; não misture aqui as posições das entidades),
+posicoes_entidades (registre separadamente as posições, consensos, divergências e entidades citadas),
 encaminhamentos (todos os encaminhamentos encontrados),
 comunicacao (todas as demandas para Comunicação; se não houver, "Sem demanda específica identificada."),
 pontos_pendentes (pendências do tema),
+observacao_institucional (ressalvas sobre instâncias decisórias, Diretoria, Assembleia, FPA, Congresso ou próximos níveis de decisão),
 mudancas (avanços ou mudanças mencionados),
 confianca_comissao ("Alta","Média","Baixa"),
 confianca_tema ("Alta","Média","Baixa").
@@ -344,12 +455,14 @@ TEXTO INTEGRAL:
         "comissoes": [c for c in data.get("comissoes", []) if c in official],
         "tema": data.get("tema") or "Novo tema",
         "resumo": data.get("resumo", ""),
+        "posicoes_entidades": data.get("posicoes_entidades", ""),
         "encaminhamentos": data.get("encaminhamentos", ""),
         "comunicacao": data.get("comunicacao") or "Sem demanda específica identificada.",
         "conf_c": data.get("confianca_comissao", "Média"),
         "conf_t": data.get("confianca_tema", "Média"),
         "assuntos_relacionados": data.get("assuntos_relacionados", []),
         "pontos_pendentes": data.get("pontos_pendentes", ""),
+        "observacao_institucional": data.get("observacao_institucional", ""),
         "mudancas": data.get("mudancas", ""),
         "tema_existente": bool(data.get("tema_existente", False)),
         "motor": "IA",
@@ -372,8 +485,10 @@ def searchable_text(record):
         " ".join(record.get("comissoes", [])),
         " ".join(record.get("assuntos_relacionados", [])),
         record.get("resumo", ""),
+        record.get("posicoes_entidades", ""),
         record.get("encaminhamentos", ""),
         record.get("pontos_pendentes", ""),
+        record.get("observacao_institucional", ""),
         record.get("mudancas", ""),
         record.get("comunicacao", ""),
         record.get("fonte", ""),
@@ -429,8 +544,10 @@ def answer_from_results(query, results):
                 "tema": rec.get("tema"),
                 "comissoes": rec.get("comissoes", []),
                 "resumo": rec.get("resumo", ""),
+                "posicoes_entidades": rec.get("posicoes_entidades", ""),
                 "encaminhamentos": rec.get("encaminhamentos", ""),
                 "pontos_pendentes": rec.get("pontos_pendentes", ""),
+                "observacao_institucional": rec.get("observacao_institucional", ""),
                 "mudancas": rec.get("mudancas", ""),
                 "comunicacao": rec.get("comunicacao", ""),
                 "texto_original": rec.get("texto_original", "")[:18000],
@@ -479,6 +596,10 @@ def render_record(record, query=""):
     st.markdown("**Resumo da discussão**")
     st.write(record.get("resumo", ""))
 
+    if record.get("posicoes_entidades"):
+        st.markdown("**Posições das entidades**")
+        st.write(record.get("posicoes_entidades"))
+
     c1, c2 = st.columns(2)
     with c1:
         if record.get("encaminhamentos"):
@@ -487,6 +608,9 @@ def render_record(record, query=""):
         if record.get("pontos_pendentes"):
             st.markdown("**Pontos pendentes**")
             st.write(record.get("pontos_pendentes"))
+        if record.get("observacao_institucional"):
+            st.markdown("**Observação institucional**")
+            st.write(record.get("observacao_institucional"))
     with c2:
         if record.get("mudancas"):
             st.markdown("**Mudanças / avanços**")
@@ -743,8 +867,10 @@ else:
 
             related = st.text_input("Assuntos relacionados", ", ".join(analysis.get("assuntos_relacionados", [])))
             summary = st.text_area("Resumo da discussão", analysis["resumo"], height=220)
+            positions = st.text_area("Posições das entidades", analysis.get("posicoes_entidades", ""), height=150)
             actions = st.text_area("Encaminhamentos", analysis["encaminhamentos"], height=150)
             pending = st.text_area("Pontos pendentes", analysis.get("pontos_pendentes", ""), height=120)
+            institutional = st.text_area("Observação institucional", analysis.get("observacao_institucional", ""), height=120)
             changes = st.text_area("Mudanças / avanços identificados", analysis.get("mudancas", ""), height=120)
             communication = st.text_area("Demanda para Comunicação", analysis["comunicacao"], height=120)
 
@@ -760,8 +886,10 @@ else:
                         "comissoes": selected_commissions,
                         "tema": theme.strip(),
                         "resumo": summary.strip(),
+                        "posicoes_entidades": positions.strip(),
                         "encaminhamentos": actions.strip(),
                         "pontos_pendentes": pending.strip(),
+                        "observacao_institucional": institutional.strip(),
                         "mudancas": changes.strip(),
                         "assuntos_relacionados": [x.strip() for x in related.split(",") if x.strip()],
                         "comunicacao": communication.strip(),
