@@ -1,6 +1,7 @@
 import json
 import re
 import unicodedata
+import time
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -447,13 +448,14 @@ def load_secrets():
     try:
         key = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
         model = str(st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")).strip()
-        return key, model
+        fallback = str(st.secrets.get("GEMINI_FALLBACK_MODEL", "")).strip()
+        return key, model, fallback
     except Exception:
-        return "", "gemini-3.8-flash"
+        return "", "gemini-3.8-flash", ""
 
 
 def ai_enabled():
-    key, _ = load_secrets()
+    key, _, _ = load_secrets()
     return bool(key)
 
 
@@ -473,7 +475,7 @@ def safe_google_error(response):
 def gemini_connection_status():
     if not ai_enabled():
         return False, "Chave não configurada"
-    key, model = load_secrets()
+    key, model, _ = load_secrets()
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}?key={key}"
         response = requests.get(url, timeout=20)
@@ -550,6 +552,29 @@ def analyze_local(text, official, existing_themes):
     }
 
 
+def call_gemini_model(model, key, payload, max_attempts=3):
+    """Tenta novamente em falhas temporárias (429/503) antes de desistir."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    last_error = None
+
+    for attempt in range(max_attempts):
+        response = requests.post(url, json=payload, timeout=90)
+
+        if response.ok:
+            return response
+
+        # falhas temporárias: espera e tenta novamente
+        if response.status_code in (429, 500, 502, 503, 504):
+            last_error = safe_google_error(response)
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+
+        raise RuntimeError(safe_google_error(response))
+
+    raise RuntimeError(last_error or "Falha temporária na API do Gemini.")
+
+
 def analyze_ai(text, official, existing_themes):
     key, model = load_secrets()
     if not key:
@@ -602,14 +627,21 @@ PAPER COMPLETO:
 {text[:80000]}
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json"},
     }
-    response = requests.post(url, json=payload, timeout=90)
-    if not response.ok:
-        raise RuntimeError(safe_google_error(response))
+
+    used_model = model
+    try:
+        response = call_gemini_model(model, key, payload, max_attempts=3)
+    except Exception as primary_error:
+        if fallback_model and fallback_model != model:
+            response = call_gemini_model(fallback_model, key, payload, max_attempts=2)
+            used_model = fallback_model
+        else:
+            raise primary_error
+
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     data = extract_json(raw)
 
@@ -633,7 +665,7 @@ PAPER COMPLETO:
         "conf_t": data.get("confianca_tema", "Média"),
         "assuntos_relacionados": data.get("assuntos_relacionados", []),
         "tema_existente": bool(data.get("tema_existente", False)),
-        "motor": f"IA · {model}",
+        "motor": f"IA · {used_model}",
     }
 
 
