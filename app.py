@@ -33,7 +33,7 @@ DATA_DIR.mkdir(exist_ok=True)
 ASSET_DIR.mkdir(exist_ok=True)
 DATA_FILE = DATA_DIR / "reunioes.json"
 COMM_FILE = DATA_DIR / "comissoes.json"
-LOGO_FILE = ASSET_DIR / "logo_ipa.png"
+LOGO_FILE = ASSET_DIR / "logo_ipa_card.png"
 
 DEFAULT_COMISSOES = [
     "Alimentação e Saúde",
@@ -515,7 +515,7 @@ def render_record(record, query=""):
 
 def sidebar_logo_and_menu():
     if LOGO_FILE.exists():
-        st.sidebar.image(str(LOGO_FILE), use_container_width=True)
+        st.sidebar.image(str(LOGO_FILE), width=175)
     st.sidebar.markdown("### IPA – Construção de Temas")
     st.sidebar.caption("Memória das comissões, temas e encaminhamentos")
     return st.sidebar.radio(
