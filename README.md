@@ -1,20 +1,22 @@
-# IPA – Construção de Temas | MVP 0.4
+# IPA – Construção de Temas | v0.7
 
-Aplicação em Streamlit para organizar a memória das comissões do IPA por **comissão → tema → reuniões/position papers**.
+Versão com base limpa, visual reformulado e foco em:
 
-## Funcionalidades atuais
-- 12 comissões do IPA pré-cadastradas;
-- temas podem se relacionar a uma ou mais comissões;
-- envio de PDF, DOCX e TXT;
-- opção de colar diretamente textos recebidos por WhatsApp, e-mail ou outro canal;
-- leitura assistida de data, comissão, tema, resumo, encaminhamentos e demanda para Comunicação;
-- revisão humana antes de salvar;
-- pesquisa na base e visualização de temas, comissões, reuniões e radar.
+- armazenamento do conteúdo integral dos papers;
+- pesquisa em tema, comissão, resumo, encaminhamentos e texto completo;
+- visual mais moderno, sóbrio e alinhado às cores do IPA;
+- comissões oficiais pré-cadastradas;
+- cadastro por upload ou colagem de texto.
 
-## Executar
+## Observações
+
+- `data/reunioes.json` foi zerado para receber apenas papers reais.
+- A camada de IA continua opcional via `st.secrets` com `GEMINI_API_KEY` e `GEMINI_MODEL`.
+- Próxima evolução recomendada: persistência em banco (Supabase).
+
+## Execução local
+
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-A próxima etapa é conectar uma camada de IA para interpretação semântica, identificação de temas já existentes e respostas sobre a evolução histórica dos assuntos.
