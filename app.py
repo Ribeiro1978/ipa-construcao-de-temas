@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 from io import BytesIO
 import json, re, unicodedata
+import requests
 
 try:
     from pypdf import PdfReader
@@ -116,7 +117,7 @@ def section(text, headings):
             if out: return " ".join(out)[:1800]
     return ""
 
-def analyze(text, official, existing):
+def analyze_local(text, official, existing):
     cs,cc=detect_commissions(text,official)
     tema,ct=detect_theme(text,existing)
     resumo=section(text,["resumo","síntese","discussão","principais pontos"])
@@ -124,7 +125,71 @@ def analyze(text, official, existing):
     enc=section(text,["encaminhamentos","próximos passos","deliberações"])
     com=section(text,["comunicação","demanda comunicação"]) or "Sem demanda específica identificada."
     return {"data":find_date(text),"comissoes":cs,"tema":tema,"resumo":resumo,
-            "encaminhamentos":enc,"comunicacao":com,"conf_c":cc,"conf_t":ct}
+            "encaminhamentos":enc,"comunicacao":com,"conf_c":cc,"conf_t":ct,
+            "assuntos_relacionados":[],"pontos_pendentes":"","mudancas":"","motor":"Análise local"}
+
+def _extract_json(raw):
+    raw=(raw or "").strip()
+    raw=re.sub(r"^\`\`\`(?:json)?","",raw,flags=re.I).strip()
+    raw=re.sub(r"\`\`\`$","",raw).strip()
+    start=raw.find("{"); end=raw.rfind("}")
+    if start>=0 and end>start: raw=raw[start:end+1]
+    return json.loads(raw)
+
+def analyze_ai(text, official, existing):
+    key=st.secrets.get("GEMINI_API_KEY","")
+    model=st.secrets.get("GEMINI_MODEL","")
+    if not key or not model:
+        return None
+    prompt=f"""Você analisa position papers de reuniões técnicas do Instituto Pensar Agro (IPA).
+Extraia APENAS fatos presentes no texto. Não invente informações.
+Comissões válidas: {json.dumps(official,ensure_ascii=False)}
+Temas já existentes: {json.dumps(existing,ensure_ascii=False)}
+
+Retorne exclusivamente JSON válido com:
+data (AAAA-MM-DD ou null),
+comissoes (array, somente nomes da lista válida),
+tema (string curta),
+tema_existente (boolean),
+assuntos_relacionados (array de strings curtas),
+resumo (síntese objetiva do que foi discutido),
+encaminhamentos (texto),
+comunicacao (demanda para Comunicação; se não houver, escreva "Sem demanda específica identificada."),
+pontos_pendentes (texto),
+mudancas (o que o documento indica como avanço, mudança ou novidade; se não for possível comparar, deixe vazio),
+confianca_comissao ("Alta","Média","Baixa"),
+confianca_tema ("Alta","Média","Baixa").
+
+TEXTO:
+{text[:22000]}"""
+    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    payload={"contents":[{"parts":[{"text":prompt}]}],
+             "generationConfig":{"temperature":0.1,"responseMimeType":"application/json"}}
+    r=requests.post(url,json=payload,timeout=45)
+    r.raise_for_status()
+    raw=r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    data=_extract_json(raw)
+    d=data.get("data")
+    try: parsed=date.fromisoformat(d) if d else find_date(text)
+    except: parsed=find_date(text)
+    valid=[c for c in data.get("comissoes",[]) if c in official]
+    return {
+        "data":parsed,"comissoes":valid,"tema":data.get("tema") or "Novo tema",
+        "resumo":data.get("resumo",""),"encaminhamentos":data.get("encaminhamentos",""),
+        "comunicacao":data.get("comunicacao") or "Sem demanda específica identificada.",
+        "conf_c":data.get("confianca_comissao","Média"),"conf_t":data.get("confianca_tema","Média"),
+        "assuntos_relacionados":data.get("assuntos_relacionados",[]),
+        "pontos_pendentes":data.get("pontos_pendentes",""),"mudancas":data.get("mudancas",""),
+        "tema_existente":bool(data.get("tema_existente",False)),"motor":"IA"
+    }
+
+def analyze(text, official, existing):
+    try:
+        ai=analyze_ai(text,official,existing)
+        if ai: return ai
+    except Exception as e:
+        st.warning(f"A análise por IA não pôde ser concluída. Usando análise local. ({e})")
+    return analyze_local(text,official,existing)
 
 comissoes=load_json(COMM_FILE,DEFAULT_COMISSOES)
 reunioes=load_json(DATA_FILE,[])
@@ -214,7 +279,11 @@ else:
     a=st.session_state.get("analise")
     if a:
         st.divider(); st.subheader("Revise as informações identificadas")
-        st.caption(f"Confiança na comissão: {a['conf_c']} · Confiança no tema: {a['conf_t']}")
+        st.caption(f"Motor: {a.get('motor','Análise local')} · Confiança na comissão: {a['conf_c']} · Confiança no tema: {a['conf_t']}")
+        if a.get("tema_existente") is True:
+            st.success("O tema identificado já existe na base e pode receber este novo registro.")
+        elif a.get("tema_existente") is False and a.get("motor")=="IA":
+            st.info("A IA considera este um novo tema. Revise antes de salvar.")
         with st.form("revisao"):
             c1,c2=st.columns(2)
             with c1:
@@ -226,8 +295,11 @@ else:
                 origem_final=st.selectbox("Origem",["Documento","WhatsApp","E-mail","Outro"],
                     index=["Documento","WhatsApp","E-mail","Outro"].index(st.session_state.get("origem","Documento")))
                 fonte=st.text_input("Fonte",f"Position Paper – {st.session_state.get('nome') or origem_final} – {dt.strftime('%d/%m/%Y')}")
+            assuntos=st.text_input("Assuntos relacionados",", ".join(a.get("assuntos_relacionados",[])))
             resumo=st.text_area("Resumo da discussão",a["resumo"],height=180)
             enc=st.text_area("Encaminhamentos",a["encaminhamentos"],height=120)
+            pend=st.text_area("Pontos pendentes",a.get("pontos_pendentes",""),height=100)
+            mud=st.text_area("Mudanças / avanços identificados",a.get("mudancas",""),height=100)
             com=st.text_area("Demanda para Comunicação",a["comunicacao"],height=100)
             if st.form_submit_button("Confirmar e salvar",type="primary",use_container_width=True):
                 if not cs or not tema.strip() or not resumo.strip():
@@ -235,7 +307,9 @@ else:
                 else:
                     novo={"id":max([r.get("id",0) for r in reunioes],default=0)+1,
                           "data":dt.isoformat(),"comissoes":cs,"tema":tema.strip(),"resumo":resumo.strip(),
-                          "encaminhamentos":enc.strip(),"comunicacao":com.strip(),"status":status,
+                          "encaminhamentos":enc.strip(),"pontos_pendentes":pend.strip(),"mudancas":mud.strip(),
+                          "assuntos_relacionados":[x.strip() for x in assuntos.split(",") if x.strip()],
+                          "comunicacao":com.strip(),"status":status,
                           "origem":origem_final,"fonte":fonte.strip(),"texto_original":st.session_state.get("texto","")}
                     reunioes.append(novo); save_json(DATA_FILE,reunioes)
                     for k in ["analise","texto","origem","nome"]: st.session_state.pop(k,None)
