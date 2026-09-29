@@ -2,342 +2,242 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from pathlib import Path
-import json
+from io import BytesIO
+import json, re, unicodedata
 
-st.set_page_config(
-    page_title="IPA – Construção de Temas",
-    page_icon="🧭",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader = None
+try:
+    from docx import Document
+except Exception:
+    Document = None
+
+st.set_page_config(page_title="IPA – Construção de Temas", page_icon="🧭", layout="wide")
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 DATA_FILE = DATA_DIR / "reunioes.json"
-COMMISSIONS_FILE = DATA_DIR / "comissoes.json"
+COMM_FILE = DATA_DIR / "comissoes.json"
 
 DEFAULT_COMISSOES = [
-    "Alimentação e Saúde",
-    "Ambiental",
-    "Bioenergia",
-    "Conselho Jurídico",
-    "Defesa Animal",
-    "Defesa Vegetal",
-    "Direito de Propriedade",
-    "Infraestrutura e Logística",
-    "Política Agrícola",
-    "Relações Internacionais",
-    "Trabalhista",
-    "Tributária",
+    "Alimentação e Saúde","Ambiental","Bioenergia","Conselho Jurídico",
+    "Defesa Animal","Defesa Vegetal","Direito de Propriedade",
+    "Infraestrutura e Logística","Política Agrícola","Relações Internacionais",
+    "Trabalhista","Tributária"
 ]
 
-DEFAULT_DATA = [
-    {
-        "id": 1,
-        "data": "2026-09-22",
-        "comissao": "Política Agrícola",
-        "tema": "Seguro Rural",
-        "assuntos_relacionados": ["PSR", "Crédito Rural"],
-        "resumo": "Discussão sobre previsibilidade orçamentária do Seguro Rural e próximos passos após avanço legislativo.",
-        "encaminhamentos": "Acompanhar regulamentação e consolidar pontos técnicos das entidades.",
-        "comunicacao": "Sem demanda específica.",
-        "status": "Em acompanhamento",
-        "fonte": "Position Paper – reunião de 22/09/2026",
-    },
-    {
-        "id": 2,
-        "data": "2026-09-18",
-        "comissao": "Defesa Vegetal",
-        "tema": "Bioinsumos",
-        "assuntos_relacionados": ["Regulamentação", "Uso próprio"],
-        "resumo": "Entidades discutiram pontos da regulamentação da Lei 15.070/2024, com atenção ao uso próprio e registro.",
-        "encaminhamentos": "Consolidar contribuições e acompanhar minuta de regulamentação.",
-        "comunicacao": "Mapear mensagens para eventual material explicativo.",
-        "status": "Em construção",
-        "fonte": "Position Paper – reunião de 18/09/2026",
-    },
-    {
-        "id": 3,
-        "data": "2026-09-15",
-        "comissao": "Política Agrícola",
-        "tema": "Crédito Rural",
-        "assuntos_relacionados": ["Plano Safra", "Endividamento"],
-        "resumo": "Debate sobre acesso ao crédito, execução do Plano Safra e efeitos do endividamento sobre novos financiamentos.",
-        "encaminhamentos": "Acompanhar dados de contratação e medidas de renegociação.",
-        "comunicacao": "Preparar síntese se houver novo dado oficial.",
-        "status": "Em acompanhamento",
-        "fonte": "Position Paper – reunião de 15/09/2026",
-    },
-]
+KEYWORDS = {
+    "Alimentação e Saúde":["alimentação","alimentos","saúde","rotulagem","nutrição"],
+    "Ambiental":["ambiental","meio ambiente","licenciamento","clima","carbono","reserva legal"],
+    "Bioenergia":["bioenergia","biocombustível","etanol","biodiesel","biometano","renovabio"],
+    "Conselho Jurídico":["jurídico","stf","constitucional","judicialização","parecer"],
+    "Defesa Animal":["defesa animal","sanidade animal","aftosa","aves","suínos","bovinos"],
+    "Defesa Vegetal":["defesa vegetal","fitossanit","bioinsumo","praga","defensivo"],
+    "Direito de Propriedade":["direito de propriedade","propriedade rural","marco temporal","reforma agrária"],
+    "Infraestrutura e Logística":["infraestrutura","logística","rodovia","ferrovia","porto","armazenagem"],
+    "Política Agrícola":["política agrícola","crédito rural","seguro rural","plano safra","endividamento","renegociação","pronaf","psr"],
+    "Relações Internacionais":["relações internacionais","comércio exterior","exportação","importação","tarifa","china","mercosul"],
+    "Trabalhista":["trabalhista","trabalho rural","jornada","emprego","mão de obra","nr-31"],
+    "Tributária":["tributária","tributário","imposto","reforma tributária","icms","itr"],
+}
 
+TEMAS = ["Seguro Rural","Crédito Rural","Plano Safra","Bioinsumos","Renegociação de Dívidas Rurais",
+         "Endividamento Rural","Profert","Licenciamento Ambiental","Reforma Tributária","Marco Temporal",
+         "Combustível do Futuro","Regularização Ambiental","Jornada de Trabalho"]
 
-def load_comissoes():
-    if not COMMISSIONS_FILE.exists():
-        COMMISSIONS_FILE.write_text(json.dumps(DEFAULT_COMISSOES, ensure_ascii=False, indent=2), encoding="utf-8")
-    return json.loads(COMMISSIONS_FILE.read_text(encoding="utf-8"))
+def norm(x):
+    x = unicodedata.normalize("NFD", str(x or ""))
+    return "".join(c for c in x if unicodedata.category(c)!="Mn").lower()
 
+def load_json(path, default):
+    if not path.exists():
+        path.write_text(json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8")
+    return json.loads(path.read_text(encoding="utf-8"))
 
-def load_data():
-    if not DATA_FILE.exists():
-        save_data(DEFAULT_DATA)
-    return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+def save_json(path, data):
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def extract_text(file):
+    raw=file.getvalue(); name=file.name.lower()
+    if name.endswith(".txt"):
+        return raw.decode("utf-8", errors="ignore")
+    if name.endswith(".docx"):
+        if not Document: raise RuntimeError("Leitura DOCX indisponível.")
+        d=Document(BytesIO(raw))
+        return "\n".join(p.text for p in d.paragraphs if p.text.strip())
+    if name.endswith(".pdf"):
+        if not PdfReader: raise RuntimeError("Leitura PDF indisponível.")
+        return "\n".join((p.extract_text() or "") for p in PdfReader(BytesIO(raw)).pages)
+    return ""
 
-def save_data(data):
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def find_date(text):
+    m=re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", text)
+    if m:
+        try: return date(int(m.group(3)),int(m.group(2)),int(m.group(1)))
+        except: pass
+    return date.today()
 
+def detect_commissions(text, official):
+    n=norm(text); scored=[]
+    for c in official:
+        score=8 if norm(c) in n else 0
+        for k in KEYWORDS.get(c,[]): score += min(n.count(norm(k)),4)
+        if score: scored.append((score,c))
+    scored.sort(reverse=True)
+    if not scored: return [],"Baixa"
+    mx=scored[0][0]
+    picks=[c for s,c in scored if s>=max(2,mx*.55)][:3]
+    return picks, ("Alta" if mx>=8 else "Média" if mx>=3 else "Baixa")
 
-def normalize(text):
-    return str(text or "").lower().strip()
+def detect_theme(text, existing):
+    n=norm(text); hits=[]
+    for t in list(dict.fromkeys(existing+TEMAS)):
+        count=n.count(norm(t))
+        if count: hits.append((count,t))
+    if hits:
+        hits.sort(reverse=True)
+        return hits[0][1], ("Alta" if hits[0][0]>=2 else "Média")
+    for line in text.splitlines()[:25]:
+        line=re.sub(r"\s+"," ",line).strip(" -–—:•")
+        if 5<=len(line)<=90 and len(line.split())<=12:
+            return line,"Baixa"
+    return "Novo tema","Baixa"
 
+def section(text, headings):
+    lines=[x.strip() for x in text.splitlines()]
+    for i,l in enumerate(lines):
+        if any(norm(h) in norm(l) for h in headings):
+            out=[]
+            for x in lines[i+1:i+12]:
+                if not x and out: break
+                if x: out.append(x)
+            if out: return " ".join(out)[:1800]
+    return ""
 
-def matches(item, query):
-    haystack = " ".join([
-        item.get("tema", ""),
-        item.get("comissao", ""),
-        item.get("resumo", ""),
-        item.get("encaminhamentos", ""),
-        item.get("comunicacao", ""),
-        item.get("status", ""),
-        " ".join(item.get("assuntos_relacionados", [])),
-    ])
-    return normalize(query) in normalize(haystack)
+def analyze(text, official, existing):
+    cs,cc=detect_commissions(text,official)
+    tema,ct=detect_theme(text,existing)
+    resumo=section(text,["resumo","síntese","discussão","principais pontos"])
+    if not resumo: resumo=re.sub(r"\s+"," ",text).strip()[:1200]
+    enc=section(text,["encaminhamentos","próximos passos","deliberações"])
+    com=section(text,["comunicação","demanda comunicação"]) or "Sem demanda específica identificada."
+    return {"data":find_date(text),"comissoes":cs,"tema":tema,"resumo":resumo,
+            "encaminhamentos":enc,"comunicacao":com,"conf_c":cc,"conf_t":ct}
 
+comissoes=load_json(COMM_FILE,DEFAULT_COMISSOES)
+reunioes=load_json(DATA_FILE,[])
+for r in reunioes:
+    if "comissoes" not in r:
+        r["comissoes"]=[r.pop("comissao")] if r.get("comissao") else []
+existing=sorted(set(r.get("tema","") for r in reunioes if r.get("tema")))
 
-def card(title, body, caption=None):
-    st.markdown(
-        f"""
-        <div style="padding:18px;border:1px solid #E7E9EE;border-radius:16px;background:#FFFFFF;min-height:150px;">
-            <div style="font-size:0.82rem;color:#657084;margin-bottom:8px;">{caption or ''}</div>
-            <div style="font-size:1.15rem;font-weight:700;color:#172033;margin-bottom:8px;">{title}</div>
-            <div style="font-size:0.95rem;color:#3E4758;line-height:1.45;">{body}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+st.sidebar.title("IPA")
+st.sidebar.caption("Construção de Temas")
+pagina=st.sidebar.radio("",["Pesquisar","Temas","Comissões","Reuniões","Radar","Adicionar position paper"])
 
+if pagina=="Pesquisar":
+    st.title("Qual assunto você quer pesquisar hoje?")
+    q=st.text_input("Pesquisar",placeholder="Ex.: Seguro Rural, bioinsumos, crédito rural...")
+    if q:
+        achados=[r for r in reunioes if norm(q) in norm(json.dumps(r,ensure_ascii=False))]
+        if not achados: st.info("Nenhum registro encontrado.")
+        for r in sorted(achados,key=lambda x:x.get("data",""),reverse=True):
+            with st.container(border=True):
+                st.subheader(r.get("tema","Sem tema"))
+                st.caption(f"{r.get('data','')} • {' • '.join(r.get('comissoes',[]))}")
+                st.write(r.get("resumo",""))
+                if r.get("encaminhamentos"): st.markdown("**Encaminhamentos:** "+r["encaminhamentos"])
 
-st.markdown(
-    """
-    <style>
-    .block-container {padding-top: 1.6rem; padding-bottom: 3rem;}
-    [data-testid="stSidebar"] {background-color: #F7F8FA;}
-    h1, h2, h3 {color:#172033;}
-    .muted {color:#687386;font-size:0.92rem;}
-    .hero {
-        padding: 28px 30px;
-        border-radius: 22px;
-        background: linear-gradient(135deg, #F5F7FA 0%, #FFFFFF 100%);
-        border: 1px solid #E6E9EF;
-        margin-bottom: 20px;
-    }
-    .hero h1 {font-size:2rem;margin-bottom:0.35rem;}
-    .hero p {font-size:1rem;color:#667085;margin:0;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-with st.sidebar:
-    st.markdown("## IPA")
-    st.markdown("**Construção de Temas**")
-    st.caption("Memória das comissões")
-    st.divider()
-    pagina = st.radio(
-        "Navegação",
-        ["Pesquisar", "Temas", "Comissões", "Reuniões", "Radar", "Adicionar position paper"],
-        label_visibility="collapsed",
-    )
-    st.divider()
-    st.caption("MVP 0.1 • Base local")
-
-reunioes = load_data()
-comissoes_oficiais = load_comissoes()
-
-if pagina == "Pesquisar":
-    st.markdown(
-        """
-        <div class="hero">
-            <h1>IPA – Construção de Temas</h1>
-            <p>Memória inteligente das discussões e encaminhamentos das comissões do IPA.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.subheader("Qual assunto você quer pesquisar hoje?")
-    query = st.text_input(
-        "Pesquisa",
-        placeholder="Ex.: Seguro Rural, bioinsumos, crédito rural, regulamentação...",
-        label_visibility="collapsed",
-    )
-
-    if query:
-        resultados = [r for r in reunioes if matches(r, query)]
-        if resultados:
-            st.markdown(f"**{len(resultados)} registro(s) encontrado(s)**")
-            for r in sorted(resultados, key=lambda x: x["data"], reverse=True):
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([2.2, 1.2, 1])
-                    with c1:
-                        st.markdown(f"### {r['tema']}")
-                        st.write(r["resumo"])
-                    with c2:
-                        st.caption("Comissão")
-                        st.write(r["comissao"])
-                        st.caption("Data")
-                        st.write(pd.to_datetime(r["data"]).strftime("%d/%m/%Y"))
-                    with c3:
-                        st.caption("Status")
-                        st.write(r["status"])
-                    st.markdown("**Encaminhamentos**")
-                    st.write(r["encaminhamentos"])
-                    st.markdown("**Comunicação**")
-                    st.write(r["comunicacao"])
-                    st.caption(r["fonte"])
-        else:
-            st.info("Nenhum registro encontrado para esse assunto.")
-    else:
-        st.markdown("#### Visão rápida")
-        c1, c2, c3, c4 = st.columns(4)
-        temas = sorted(set(r["tema"] for r in reunioes))
-        comissoes = sorted(set(r["comissao"] for r in reunioes))
-        com_demanda = [r for r in reunioes if "sem demanda" not in normalize(r["comunicacao"])]
-        em_construcao = [r for r in reunioes if "construção" in normalize(r["status"])]
-        c1.metric("Temas", len(temas))
-        c2.metric("Comissões", len(comissoes))
-        c3.metric("Demandas de Comunicação", len(com_demanda))
-        c4.metric("Em construção", len(em_construcao))
-
-        st.markdown("#### Últimos movimentos")
-        ultimos = sorted(reunioes, key=lambda x: x["data"], reverse=True)[:3]
-        cols = st.columns(3)
-        for col, r in zip(cols, ultimos):
-            with col:
-                card(r["tema"], r["resumo"], f"{r['comissao']} • {pd.to_datetime(r['data']).strftime('%d/%m/%Y')}")
-
-elif pagina == "Temas":
+elif pagina=="Temas":
     st.title("Temas")
-    st.caption("Acompanhe o histórico consolidado de cada assunto discutido no IPA.")
+    for tema in existing:
+        itens=[r for r in reunioes if r.get("tema")==tema]
+        coms=sorted(set(c for r in itens for c in r.get("comissoes",[])))
+        with st.expander(f"{tema} · {len(itens)} registro(s)"):
+            st.caption("Comissões: "+(", ".join(coms) or "—"))
+            for r in sorted(itens,key=lambda x:x.get("data",""),reverse=True):
+                st.markdown(f"**{r.get('data','')}** — {r.get('resumo','')}")
 
-    temas = sorted(set(r["tema"] for r in reunioes))
-    tema_escolhido = st.selectbox("Selecione um tema", temas)
-    relacionados = [r for r in reunioes if r["tema"] == tema_escolhido]
-    relacionados = sorted(relacionados, key=lambda x: x["data"])
-
-    st.markdown(f"## {tema_escolhido}")
-    st.write(relacionados[-1]["resumo"])
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Reuniões relacionadas", len(relacionados))
-    c2.metric("Comissões envolvidas", len(set(r["comissao"] for r in relacionados)))
-    c3.metric("Último movimento", pd.to_datetime(relacionados[-1]["data"]).strftime("%d/%m/%Y"))
-
-    st.markdown("### Linha do tempo")
-    for r in relacionados:
-        with st.container(border=True):
-            st.markdown(f"**{pd.to_datetime(r['data']).strftime('%d/%m/%Y')} • {r['comissao']}**")
-            st.write(r["resumo"])
-            st.markdown(f"**Encaminhamento:** {r['encaminhamentos']}")
-            st.caption(r["fonte"])
-
-elif pagina == "Comissões":
+elif pagina=="Comissões":
     st.title("Comissões")
-    st.caption("Estrutura fixa das comissões do IPA. Os temas e reuniões são vinculados a uma ou mais delas ao longo do tempo.")
+    for c in comissoes:
+        itens=[r for r in reunioes if c in r.get("comissoes",[])]
+        temas=sorted(set(r.get("tema","") for r in itens if r.get("tema")))
+        with st.expander(f"{c} · {len(temas)} tema(s) · {len(itens)} reunião(ões)"):
+            if temas: st.write(", ".join(temas))
+            else: st.caption("Nenhum tema registrado ainda.")
 
-    for nome in comissoes_oficiais:
-        regs = [r for r in reunioes if r.get("comissao") == nome]
-        temas = sorted(set(r.get("tema", "") for r in regs if r.get("tema")))
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([2.5, 1, 1])
-            with c1:
-                st.markdown(f"### {nome}")
-                if temas:
-                    st.write(" • ".join(temas))
-                else:
-                    st.caption("Nenhum tema cadastrado ainda.")
-            c2.metric("Temas", len(temas))
-            c3.metric("Reuniões", len(regs))
-
-elif pagina == "Reuniões":
+elif pagina=="Reuniões":
     st.title("Reuniões")
-    st.caption("Base completa dos registros acompanhados pela Comunicação.")
+    if reunioes:
+        df=pd.DataFrame([{"Data":r.get("data"),"Tema":r.get("tema"),"Comissões":", ".join(r.get("comissoes",[])),
+                          "Status":r.get("status"),"Origem":r.get("origem","Documento")} for r in reunioes])
+        st.dataframe(df,hide_index=True,use_container_width=True)
+    else: st.info("Nenhuma reunião registrada.")
 
-    df = pd.DataFrame(reunioes)
-    if not df.empty:
-        df["data"] = pd.to_datetime(df["data"]).dt.strftime("%d/%m/%Y")
-        exibicao = df[["data", "comissao", "tema", "status", "encaminhamentos", "comunicacao"]]
-        st.dataframe(exibicao, use_container_width=True, hide_index=True)
-
-elif pagina == "Radar":
+elif pagina=="Radar":
     st.title("Radar")
-    st.caption("O que merece atenção nas comissões agora.")
+    c1,c2=st.columns(2)
+    c1.metric("Temas",len(existing)); c2.metric("Reuniões",len(reunioes))
+    demandas=[r for r in reunioes if r.get("comunicacao") and "sem demanda" not in norm(r.get("comunicacao"))]
+    st.subheader("Demandas para Comunicação")
+    if demandas:
+        for r in demandas: st.markdown(f"**{r.get('tema')}** — {r.get('comunicacao')}")
+    else: st.info("Nenhuma demanda registrada.")
 
-    recentes = sorted(reunioes, key=lambda x: x["data"], reverse=True)
-    demandas = [r for r in recentes if "sem demanda" not in normalize(r["comunicacao"])]
-    construcao = [r for r in recentes if "construção" in normalize(r["status"])]
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### Temas em construção")
-        if construcao:
-            for r in construcao:
-                with st.container(border=True):
-                    st.markdown(f"**{r['tema']}**")
-                    st.write(r["encaminhamentos"])
-                    st.caption(f"{r['comissao']} • {pd.to_datetime(r['data']).strftime('%d/%m/%Y')}")
-        else:
-            st.info("Nenhum tema marcado como em construção.")
-
-    with c2:
-        st.markdown("### Demandas para Comunicação")
-        if demandas:
-            for r in demandas:
-                with st.container(border=True):
-                    st.markdown(f"**{r['tema']}**")
-                    st.write(r["comunicacao"])
-                    st.caption(f"{r['comissao']} • {pd.to_datetime(r['data']).strftime('%d/%m/%Y')}")
-        else:
-            st.info("Nenhuma demanda registrada.")
-
-elif pagina == "Adicionar position paper":
+else:
     st.title("Adicionar position paper")
-    st.caption("Nesta primeira versão, cadastramos os principais campos manualmente. A leitura automática por IA entra na próxima etapa.")
-
-    with st.form("novo_registro"):
-        col1, col2 = st.columns(2)
-        with col1:
-            data_reuniao = st.date_input("Data da reunião", value=date.today())
-            comissao = st.text_input("Comissão", placeholder="Ex.: Política Agrícola")
-            tema = st.text_input("Tema principal", placeholder="Ex.: Seguro Rural")
-        with col2:
-            status = st.selectbox("Status", ["Em construção", "Em acompanhamento", "Consolidado", "Aguardando retorno", "Encerrado"])
-            relacionados = st.text_input("Assuntos relacionados", placeholder="Separe por vírgulas")
-            fonte = st.text_input("Fonte", placeholder="Ex.: Position Paper – reunião de 29/09/2026")
-
-        resumo = st.text_area("Resumo da discussão", height=140)
-        encaminhamentos = st.text_area("Encaminhamentos", height=110)
-        comunicacao = st.text_area("Demanda para Comunicação", height=90, value="Sem demanda específica.")
-        arquivo = st.file_uploader("Anexar position paper (opcional nesta versão)", type=["pdf", "docx", "txt"])
-
-        salvar = st.form_submit_button("Salvar registro", type="primary", use_container_width=True)
-
-        if salvar:
-            if not comissao or not tema or not resumo:
-                st.error("Preencha pelo menos Comissão, Tema principal e Resumo da discussão.")
+    st.caption("Envie um documento ou cole o conteúdo recebido por WhatsApp/e-mail. Você revisa tudo antes de salvar.")
+    modo=st.radio("Como quer adicionar?",["Enviar arquivo","Colar texto"],horizontal=True)
+    if modo=="Enviar arquivo":
+        arq=st.file_uploader("PDF, DOCX ou TXT",type=["pdf","docx","txt"])
+        if arq and st.button("Analisar documento",type="primary"):
+            try:
+                texto=extract_text(arq)
+                if not texto.strip(): st.error("Não foi possível extrair texto.")
+                else:
+                    st.session_state["analise"]=analyze(texto,comissoes,existing)
+                    st.session_state["texto"]=texto; st.session_state["origem"]="Documento"; st.session_state["nome"]=arq.name
+            except Exception as e: st.error(str(e))
+    else:
+        texto_colado=st.text_area("Cole aqui o position paper ou relato da reunião",height=300,
+                                  placeholder="Cole o texto recebido pelo WhatsApp, e-mail ou outro canal...")
+        origem_sel=st.selectbox("Origem",["WhatsApp","E-mail","Outro"])
+        if st.button("Analisar conteúdo",type="primary"):
+            if not texto_colado.strip(): st.warning("Cole algum conteúdo antes de analisar.")
             else:
-                novo = {
-                    "id": max([r["id"] for r in reunioes], default=0) + 1,
-                    "data": data_reuniao.isoformat(),
-                    "comissao": comissao.strip(),
-                    "tema": tema.strip(),
-                    "assuntos_relacionados": [x.strip() for x in relacionados.split(",") if x.strip()],
-                    "resumo": resumo.strip(),
-                    "encaminhamentos": encaminhamentos.strip(),
-                    "comunicacao": comunicacao.strip(),
-                    "status": status,
-                    "fonte": fonte.strip() or f"Position Paper – reunião de {data_reuniao.strftime('%d/%m/%Y')}",
-                }
-                reunioes.append(novo)
-                save_data(reunioes)
-                st.success("Registro salvo com sucesso.")
+                st.session_state["analise"]=analyze(texto_colado,comissoes,existing)
+                st.session_state["texto"]=texto_colado; st.session_state["origem"]=origem_sel; st.session_state["nome"]=""
+
+    a=st.session_state.get("analise")
+    if a:
+        st.divider(); st.subheader("Revise as informações identificadas")
+        st.caption(f"Confiança na comissão: {a['conf_c']} · Confiança no tema: {a['conf_t']}")
+        with st.form("revisao"):
+            c1,c2=st.columns(2)
+            with c1:
+                dt=st.date_input("Data da reunião",a["data"])
+                cs=st.multiselect("Comissão(ões)",comissoes,default=[x for x in a["comissoes"] if x in comissoes])
+                tema=st.text_input("Tema principal",a["tema"])
+            with c2:
+                status=st.selectbox("Status",["Em construção","Em acompanhamento","Consolidado","Aguardando retorno","Encerrado"])
+                origem_final=st.selectbox("Origem",["Documento","WhatsApp","E-mail","Outro"],
+                    index=["Documento","WhatsApp","E-mail","Outro"].index(st.session_state.get("origem","Documento")))
+                fonte=st.text_input("Fonte",f"Position Paper – {st.session_state.get('nome') or origem_final} – {dt.strftime('%d/%m/%Y')}")
+            resumo=st.text_area("Resumo da discussão",a["resumo"],height=180)
+            enc=st.text_area("Encaminhamentos",a["encaminhamentos"],height=120)
+            com=st.text_area("Demanda para Comunicação",a["comunicacao"],height=100)
+            if st.form_submit_button("Confirmar e salvar",type="primary",use_container_width=True):
+                if not cs or not tema.strip() or not resumo.strip():
+                    st.error("Confirme comissão, tema e resumo.")
+                else:
+                    novo={"id":max([r.get("id",0) for r in reunioes],default=0)+1,
+                          "data":dt.isoformat(),"comissoes":cs,"tema":tema.strip(),"resumo":resumo.strip(),
+                          "encaminhamentos":enc.strip(),"comunicacao":com.strip(),"status":status,
+                          "origem":origem_final,"fonte":fonte.strip(),"texto_original":st.session_state.get("texto","")}
+                    reunioes.append(novo); save_json(DATA_FILE,reunioes)
+                    for k in ["analise","texto","origem","nome"]: st.session_state.pop(k,None)
+                    st.success("Position paper registrado.")
+                    st.rerun()
