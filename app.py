@@ -391,7 +391,14 @@ def parse_paper_blocks(text):
         if heading in {"encaminhamento", "encaminhamentos", "proximos passos", "deliberacoes"}:
             current = "encaminhamentos"
             continue
-        if heading.startswith("importante") or heading.startswith("atencao"):
+        if (
+            heading.startswith("importante")
+            or heading.startswith("atencao")
+            or heading.startswith("ponto de atencao")
+            or heading.startswith("pontos de atencao")
+            or heading.startswith("pendencia")
+            or heading.startswith("pendencias")
+        ):
             current = "importante"
             # preserva texto após "Importante:" na mesma linha
             after = re.sub(r"(?i)^.*?(importante|atenção|atencao)\s*:\s*", "", stripped).strip()
@@ -438,9 +445,16 @@ def section(text, headings, max_chars=5000):
 
 def load_secrets():
     try:
-        return st.secrets.get("GEMINI_API_KEY", ""), st.secrets.get("GEMINI_MODEL", "")
+        key = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+        model = str(st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")).strip()
+        return key, model
     except Exception:
-        return "", ""
+        return "", "gemini-3.8-flash"
+
+
+def ai_enabled():
+    key, _ = load_secrets()
+    return bool(key)
 
 
 def extract_json(raw):
@@ -511,42 +525,66 @@ def analyze_local(text, official, existing_themes):
 
 def analyze_ai(text, official, existing_themes):
     key, model = load_secrets()
-    if not key or not model:
+    if not key:
         return None
 
-    prompt = f"""Você analisa position papers de reuniões técnicas do Instituto Pensar Agro (IPA).
-Extraia somente informações presentes no texto. Não invente.
-Comissões válidas: {json.dumps(official, ensure_ascii=False)}
-Temas já existentes: {json.dumps(existing_themes, ensure_ascii=False)}
+    prompt = f"""Você é o motor de inteligência documental do Instituto Pensar Agro (IPA).
+Sua tarefa é LER, COMPREENDER e ESTRUTURAR integralmente um position paper de reunião técnica.
 
-Retorne exclusivamente JSON válido com:
-data (AAAA-MM-DD ou null),
-comissoes (array somente com nomes válidos),
-tema (string curta e representativa),
-tema_existente (boolean),
-assuntos_relacionados (array),
-resumo (síntese factual da abertura/contexto da reunião; não misture aqui as posições das entidades),
-posicoes_entidades (registre separadamente as posições, consensos, divergências e entidades citadas),
-encaminhamentos (todos os encaminhamentos encontrados),
-comunicacao (todas as demandas para Comunicação; se não houver, "Sem demanda específica identificada."),
-pontos_pendentes (pendências do tema),
-observacao_institucional (ressalvas sobre instâncias decisórias, Diretoria, Assembleia, FPA, Congresso ou próximos níveis de decisão),
-mudancas (avanços ou mudanças mencionados),
-confianca_comissao ("Alta","Média","Baixa"),
-confianca_tema ("Alta","Média","Baixa").
+Não faça simples busca por palavras-chave.
+Interprete o sentido do texto, inclusive quando a informação estiver em parágrafos corridos, listas,
+mensagens copiadas do WhatsApp, títulos com emoji ou seções com nomes diferentes.
 
-TEXTO INTEGRAL:
-{text[:60000]}"""
+COMISSÕES VÁLIDAS:
+{json.dumps(official, ensure_ascii=False)}
+
+TEMAS JÁ EXISTENTES:
+{json.dumps(existing_themes, ensure_ascii=False)}
+
+REGRAS DE CLASSIFICAÇÃO:
+- "resumo": explique em texto corrido qual foi o objetivo da reunião, o contexto e o que foi discutido.
+- "posicoes_entidades": consolide TODAS as posições, consensos, divergências e entidades mencionadas.
+- "encaminhamentos": inclua decisões tomadas, tarefas atribuídas, documentos a produzir, envios definidos e também "próximos passos".
+- "pontos_pendentes": inclua "ponto de atenção", riscos, questões sem consenso, dúvidas e assuntos que ainda dependem de decisão.
+- "observacao_institucional": registre quando o texto disser que o assunto seguirá para Diretoria do IPA, Assembleia, FPA, parlamentares, Congresso ou outra instância decisória.
+- "mudancas": registre avanços ou mudanças expressamente descritos no próprio paper. Se o paper não permitir comparação, deixe vazio.
+- "comunicacao": identifique apenas demandas efetivas para a Comunicação. Se não houver, escreva "Sem demanda específica identificada."
+- "assuntos_relacionados": liste subtemas relevantes e específicos.
+- Não deixe um campo vazio apenas porque não existe um título literal com aquele nome. Extraia pelo significado.
+- Não invente fatos, nomes, posições ou decisões.
+
+Retorne EXCLUSIVAMENTE JSON válido com esta estrutura:
+{{
+  "data": "AAAA-MM-DD ou null",
+  "comissoes": ["somente nomes da lista válida"],
+  "tema": "tema principal curto",
+  "tema_existente": true,
+  "assuntos_relacionados": [],
+  "resumo": "",
+  "posicoes_entidades": "",
+  "encaminhamentos": "",
+  "pontos_pendentes": "",
+  "observacao_institucional": "",
+  "mudancas": "",
+  "comunicacao": "",
+  "confianca_comissao": "Alta|Média|Baixa",
+  "confianca_tema": "Alta|Média|Baixa"
+}}
+
+PAPER COMPLETO:
+{text[:80000]}
+"""
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json"},
     }
-    response = requests.post(url, json=payload, timeout=60)
+    response = requests.post(url, json=payload, timeout=90)
     response.raise_for_status()
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     data = extract_json(raw)
+
     try:
         parsed_date = date.fromisoformat(data.get("data")) if data.get("data") else find_date(text)
     except Exception:
@@ -559,26 +597,42 @@ TEXTO INTEGRAL:
         "resumo": data.get("resumo", ""),
         "posicoes_entidades": data.get("posicoes_entidades", ""),
         "encaminhamentos": data.get("encaminhamentos", ""),
+        "pontos_pendentes": data.get("pontos_pendentes", ""),
+        "observacao_institucional": data.get("observacao_institucional", ""),
+        "mudancas": data.get("mudancas", ""),
         "comunicacao": data.get("comunicacao") or "Sem demanda específica identificada.",
         "conf_c": data.get("confianca_comissao", "Média"),
         "conf_t": data.get("confianca_tema", "Média"),
         "assuntos_relacionados": data.get("assuntos_relacionados", []),
-        "pontos_pendentes": data.get("pontos_pendentes", ""),
-        "observacao_institucional": data.get("observacao_institucional", ""),
-        "mudancas": data.get("mudancas", ""),
         "tema_existente": bool(data.get("tema_existente", False)),
-        "motor": "IA",
+        "motor": f"IA · {model}",
     }
 
 
 def analyze(text, official, existing_themes):
-    try:
-        ai = analyze_ai(text, official, existing_themes)
-        if ai:
-            return ai
-    except Exception:
-        st.warning("A IA não pôde responder neste momento. A análise local foi usada.")
-    return analyze_local(text, official, existing_themes)
+    if ai_enabled():
+        try:
+            result = analyze_ai(text, official, existing_themes)
+            if result:
+                return result
+        except Exception as exc:
+            st.error(
+                "A leitura inteligente por IA falhou. "
+                "Não vou fingir que a análise básica equivale à leitura semântica."
+            )
+            st.caption(f"Detalhe técnico: {type(exc).__name__}")
+            st.info("Foi gerada abaixo apenas uma leitura básica para você não perder o conteúdo.")
+            basic = analyze_local(text, official, existing_themes)
+            basic["motor"] = "Leitura básica · IA falhou"
+            return basic
+
+    st.warning(
+        "IA ainda não configurada. Esta é apenas uma leitura básica por regras e pode deixar campos vazios. "
+        "Configure GEMINI_API_KEY nos Secrets do Streamlit para ativar a leitura inteligente."
+    )
+    basic = analyze_local(text, official, existing_themes)
+    basic["motor"] = "Leitura básica · IA não configurada"
+    return basic
 
 
 def searchable_text(record):
@@ -785,6 +839,12 @@ else:
     if db_detail:
         st.caption(f"Detalhe técnico: {db_detail}")
 
+if ai_enabled():
+    _, active_model = load_secrets()
+    st.sidebar.success(f"IA ativa · {active_model}")
+else:
+    st.sidebar.warning("IA não configurada")
+
 # ---------- pages ----------
 if pagina == "Pesquisar":
     hero("Qual assunto você quer pesquisar hoje?", "Busque por tema, comissão, encaminhamentos ou dentro do conteúdo integral dos position papers.")
@@ -982,8 +1042,8 @@ else:
             related = st.text_input("Assuntos relacionados", ", ".join(analysis.get("assuntos_relacionados", [])))
             summary = st.text_area("Resumo da discussão", analysis["resumo"], height=220)
             positions = st.text_area("Posições das entidades", analysis.get("posicoes_entidades", ""), height=150)
-            actions = st.text_area("Encaminhamentos", analysis["encaminhamentos"], height=150)
-            pending = st.text_area("Pontos pendentes", analysis.get("pontos_pendentes", ""), height=120)
+            actions = st.text_area("Encaminhamentos / próximos passos", analysis["encaminhamentos"], height=170)
+            pending = st.text_area("Pontos de atenção / pendências", analysis.get("pontos_pendentes", ""), height=140)
             institutional = st.text_area("Observação institucional", analysis.get("observacao_institucional", ""), height=120)
             changes = st.text_area("Mudanças / avanços identificados", analysis.get("mudancas", ""), height=120)
             communication = st.text_area("Demanda para Comunicação", analysis["comunicacao"], height=120)
