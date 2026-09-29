@@ -164,8 +164,13 @@ def save_json(path: Path, data):
 
 def supabase_config():
     try:
-        url = str(st.secrets.get("SUPABASE_URL", "")).rstrip("/")
-        key = str(st.secrets.get("SUPABASE_KEY", ""))
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_KEY", "")).strip()
+
+        # Aceita também URL colada sem o protocolo.
+        if url and not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
         return url, key
     except Exception:
         return "", ""
@@ -202,9 +207,17 @@ def load_records():
     if supabase_enabled():
         url, _ = supabase_config()
         endpoint = f"{url}/rest/v1/ipa_papers?select=*&order=data.desc,criado_em.desc"
-        response = requests.get(endpoint, headers=supabase_headers(), timeout=30)
-        response.raise_for_status()
-        return [normalize_db_record(row) for row in response.json()]
+        try:
+            response = requests.get(endpoint, headers=supabase_headers(), timeout=30)
+            response.raise_for_status()
+            return [normalize_db_record(row) for row in response.json()]
+        except Exception as exc:
+            st.error(
+                "Não foi possível conectar ao Supabase. "
+                "Confira SUPABASE_URL e SUPABASE_KEY em Settings > Secrets do Streamlit."
+            )
+            st.caption(f"Detalhe técnico: {type(exc).__name__}")
+            return []
 
     # fallback local apenas para desenvolvimento
     return load_json(DATA_FILE, [])
